@@ -1,0 +1,229 @@
+library(rstan)
+library(lubridate)
+library(ragg)
+library(tidyverse)
+
+
+# Bancos de dados e variáveis importantes -------------------------------------
+
+pesquisas <- read_delim("input/pesquisas_agregador.csv", delim = ";") |>
+  mutate(candidato = case_when(candidato == "João Doria" ~ "Doria",
+                               candidato == "Sergio Moro" ~ "Moro",
+                               candidato == "Simone Tebet" ~ "Tebet",
+                               TRUE ~ candidato),
+         percentual = as.numeric(percentual) / 100,
+         margem_candidato = 2 * 1.96 * sqrt(percentual * (1 - percentual) / qtd_entrevistas),
+         data_pesquisa = dmy(data_pesquisa)) |>
+  select(data_pesquisa,
+         instituto_id,
+         instituto,
+         candidato,
+         percentual,
+         margem_candidato,
+         qtd_entrevistas,
+         turno,
+         condicao) |>
+  rename(voto_nao_valido = condicao,
+         dia = data_pesquisa) |>
+  filter(dia >= today() - years(1),
+         percentual > 0) |>
+  # t_pesquisa indica o tempo decorrido (em dias) desde a primeira pesquisa.
+  # Assim, t_pesquisa = 1 é o dia da primeira pesquisa na análise. Por isso
+  # é criado depois do filtro de data.
+  group_by(candidato) |>
+  mutate(t_pesquisa = as.integer(dia - min(dia) + 1),
+         metodologia = case_when(instituto %in% c("FSB", "Ponteio", "Ideia Big Data", "PoderData", "Ipespe", "Futura", "Ranking") ~ "Telefônica",
+                                 instituto %in% c("Sensus", "Quaest", "Ipec", "Paraná Pesquisas", "Vox Populi", "Datafolha", "Datatempo", "Gerp") ~ "Presencial",
+                                 instituto %in% c("Atlas") ~ "Online",
+                                 instituto == "MDA" & dia <= dmy("30-04-2022") ~ "Presencial",
+                                 instituto == "MDA" & dia > dmy("30-04-2022") ~ "Telefônica",
+                                 TRUE ~ NA_character_)) |>
+  ungroup() |>
+  arrange(dia)
+
+
+
+# Candidatos que vão aparecer nos gráficos
+
+candidatos_1t <- c("Lula",
+                   "Ciro",
+                   "Tebet",
+                   "Bolsonaro")
+
+candidatos_2t <- c("Lula",
+                   "Bolsonaro")
+
+
+
+# Definição de funções --------------------------------------------------------
+
+rodar_modelo <- function(bd, arquivo_stan) {
+
+  # Simulações
+  m <- stan(arquivo_stan,
+            data = list(total_dias = max(bd$t_pesquisa),
+                        n_pesquisas = nrow(bd),
+                        percentual = bd$percentual,
+                        n_dias = bd$t_pesquisa,
+                        sigma = bd$margem_candidato,
+                        instituto_id = bd$instituto_id,
+                        n_institutos = length(unique(bd$instituto_id))),
+            cores = parallel::detectCores(),
+            chains = 1,
+            warmup = 200,
+            iter = 500)
+
+  # Extração dos resultados
+  mu <- rstan::extract(m)$mu |>
+    # O modelo do Stan retorna uma matriz que tem as simulações nas linhas e os
+    # dias nas colunas. A ideia aqui é calcular, para cada coluna (dia), a simu-
+    # lação mediana, assim como os limites para o intervalo de credibilidade
+    as_tibble() |>
+    summarize(across(everything(),
+                     list(li = function(x) quantile(x, .025),
+                          mediana = median,
+                          ls = function(x) quantile(x, .975)))) |>
+    pivot_longer(everything(),
+                 names_to = c("t", ".value"),
+                 names_sep = "_") |>
+    mutate(dia = seq.Date(min(bd$dia), max(bd$dia), by = "day")) |>
+    select(dia, li, mediana, ls) |>
+    left_join(bd, by = "dia") |>
+    fill(metodologia) |>
+    arrange(dia)
+
+  rm(m)
+
+  return(mu)
+}
+
+
+
+agregador_ponteio <- function(bd = pesquisas, turno) {
+
+  if (turno == 1) {
+    bd <- bd |> filter(turno == 1 & candidato %in% candidatos_1t)
+
+    cat("Iniciando as simulações...\n")
+
+    set.seed(1234)
+
+    resultado_agregador_1t <- bd |>
+      group_by(candidato) |>
+      nest() |>
+      mutate(modelos = map(data, rodar_modelo, arquivo_stan = "modelo.stan")) |>
+      unnest(modelos) |>
+      select(-data)
+
+    save(resultado_agregador_1t, file = "output/resultados_1t.RData")
+
+    return(resultado_agregador_1t)
+
+  } else if (turno == 2) {
+    bd <- bd |> filter(turno == 2 & candidato %in% candidatos_2t)
+
+    cat("Iniciando as simulações...\n")
+
+    set.seed(1234)
+
+    resultado_agregador_2t <- bd |>
+      group_by(candidato) |>
+      nest() |>
+      mutate(modelos = map(data, rodar_modelo, arquivo_stan = "modelo.stan")) |>
+      unnest(modelos) |>
+      select(-data)
+
+    save(resultado_agregador_2t, file = "output/resultados_2t.RData")
+
+    return(resultado_agregador_2t)
+
+  } else {
+    stop("Obrigatório definir 1 ou 2 turno")
+  }
+}
+
+
+
+grafico_agregador <- function(bd, turno) {
+
+  if (turno == 1) {
+    bd <- resultado_agregador_1t
+    grafico_out <- "output/agregador_1t.png"
+    cores_legenda <- c("Lula" = "#CF4446",
+                       "Bolsonaro" = "#446AAF",
+                       "Ciro" = "#35B779",
+                       "Tebet" = "#F7D13D")
+    cores_valores <- c("#35B779", "#CF4446", "#446AAF", "#F7D13D")
+    titulo_grafico <- "Agregador de Pesquisas - 1º Turno"
+
+  } else if (turno == 2) {
+    bd <- resultado_agregador_2t
+    grafico_out <- "output/agregador_2t.png"
+    cores_legenda <- c("Lula" = "#CF4446",
+                       "Bolsonaro" = "#446AAF")
+    cores_valores <- c("#CF4446", "#446AAF")
+    titulo_grafico <- "Agregador de Pesquisas - 2º Turno"
+
+  } else {
+    stop("Obrigatório definir 1 ou 2 turno")
+  }
+
+  p <- bd |>
+    ggplot(aes(x = dia, y = mediana)) +
+    # Definição dos geoms
+    geom_line(aes(color = fct_reorder2(candidato, dia, mediana)),
+              lineend = "round", size = 1.5) +
+    geom_ribbon(aes(ymin = li,  ymax = ls, fill = fct_reorder2(candidato, dia, mediana)),
+                alpha = 0.1) +
+    geom_point(aes(y = percentual, color = candidato, shape = metodologia),
+               size = 2, alpha = .5) +
+    # Legendas
+    scale_fill_manual(values = cores_legenda) +
+    scale_colour_manual(values = cores_legenda) +
+    scale_shape_manual(values = c(3, 1, 19)) +
+    guides(color = guide_legend(order = 1),
+           fill = guide_legend(order = 1),
+           shape = guide_legend(order = 2)) +
+    # Escalas
+    scale_y_continuous(expand = c(0, .01), labels = scales::label_percent(),
+                       sec.axis = sec_axis(~ ., labels = scales::label_percent(1),
+                                           breaks = function(x) bd |>
+                                             group_by(candidato) |>
+                                             top_n(1, dia) |>
+                                             pull(mediana))) +
+    scale_x_date(expand = c(.01, .01), date_breaks = "1 month",
+                 labels = function(x) if_else(is.na(lag(x)) | year(lag(x)) != year(x),
+                                              paste0(str_to_title(month(x, label = TRUE)), "\n", year(x)),
+                                              paste0(str_to_title(month(x, label = TRUE))))) +
+    # Acabamento
+    theme_bw() +
+    labs(title = titulo_grafico,
+         subtitle = "ponteiopolitica.com",
+         color = "Candidatos",
+         fill = "Candidatos",
+         shape = "Metodologia") +
+    theme(text = element_text(family = "Fira Sans"),
+          plot.title = element_text(face = "bold", size = 18, hjust = .5),
+          plot.subtitle = element_text(face = "italic", hjust = .5, color = "#777777"),
+          panel.grid.minor = element_blank(),
+          panel.grid.major.x = element_blank(),
+          panel.border = element_blank(),
+          axis.line.x.bottom = element_line(color = "black", size = 1),
+          axis.title = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text.x = element_text(size = 11),
+          axis.text.y = element_text(size = 11),
+          axis.text.y.right = element_text(size = 18, face = "bold",
+                                           color = cores_valores),
+          legend.title = element_text(face = "bold", size = 9),
+          legend.text = element_text(size = 9),
+          legend.position = "top",
+          legend.box = "vertical",
+          legend.spacing.y = unit(-10, "pt"),
+          legend.background = element_rect(fill = "transparent"))
+
+  ggsave(grafico_out, p, device = agg_png, dpi = 320, width = 9.12, height = 5.98, units = "in")
+
+  print(p)
+
+}

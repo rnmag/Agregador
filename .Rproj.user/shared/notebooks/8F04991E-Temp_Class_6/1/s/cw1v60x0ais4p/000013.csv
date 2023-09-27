@@ -1,0 +1,6 @@
+"0","flights %>% sample_n(1000) %>% ggplot() +
+  geom_point(aes(x=sched_dep_time, y=dep_time, size=distance))
+"
+"2","Warning:"
+"2"," Removed 24 rows containing missing values (geom_point).
+"

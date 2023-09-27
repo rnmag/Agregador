@@ -1,0 +1,10 @@
+"0","flights %>% sample_n(1000) %>% ggplot() +
+  geom_point(aes(x=sched_dep_time, y=dep_time, color=distance)) +
+  scale_color_gradient(low=""yellow"", high=""red"") +
+  xlab(""Horário de Partida Programada"") +
+  ylab(""Horário de Partida"") +
+  ggtitle(""Gráfico de Voos"")
+"
+"2","Warning:"
+"2"," Removed 24 rows containing missing values (geom_point).
+"

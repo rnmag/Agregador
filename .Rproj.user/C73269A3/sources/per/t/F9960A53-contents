@@ -1,0 +1,5 @@
+source("main.R", encoding = "UTF-8")
+
+resultado_agregador_1t <- agregador_ponteio(turno = 1)
+
+grafico_agregador(turno = 1)
