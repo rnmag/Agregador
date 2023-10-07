@@ -1,6 +1,6 @@
 # Poll Aggregation for the 2022 Brazilian Presidential Election
 
-![Polling Averages](https://github.com/rnmag/Agregador/blob/main/output/agregador_2t.png?raw=true)
+![Polling Averages](https://github.com/rnmag/Agregador/blob/main/output/agregador_1t.png?raw=true)
 
 State special model aimed at estimating the voting intentions for candidates in Brazil's 2022 presidential elections. It includes time-constant biases specific to each pollster,normalizing them to a zero sum.
 
